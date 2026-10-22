@@ -235,25 +235,30 @@ def processStateData(data) {
         sendEvent(name: "airConOperationMode", value: opMode)
     }
 
-    // Derive switch state from runState or operation mode
-    def isPoweredOff = false
-    if (currentState || airConOpModeRaw) {
-        def modeText = currentState ?: airConOpModeRaw ?: ""
-        isPoweredOff = (modeText =~ /(?i)power_off|off/)
-        def switchState = isPoweredOff ? 'off' : 'on'
-        sendEvent(name: "switch", value: switchState)
-        if (logDescText && currentState) {
-            log.info "${device.displayName} CurrentState: ${currentState}, Switch: ${switchState}"
+    // MQTT updates are partial: keep the last raw values so a message without
+    // operation or job mode does not reset the switch or thermostat mode.
+    if (airConOpModeRaw) state.lastAirConOperationMode = airConOpModeRaw.toString()
+    if (currentJobModeRaw) state.lastJobMode = currentJobModeRaw.toString()
+
+    // Power state comes from airConOperationMode (POWER_ON/POWER_OFF).
+    // runState.currentState is NORMAL/ERROR and stays NORMAL while the unit is off.
+    if (airConOpModeRaw || currentJobModeRaw) {
+        String opMode = state.lastAirConOperationMode ?: ""
+        boolean isPoweredOff = opMode.equalsIgnoreCase("POWER_OFF")
+        String jobMode = state.lastJobMode
+
+        if (airConOpModeRaw) {
+            def switchState = isPoweredOff ? 'off' : 'on'
+            sendEvent(name: "switch", value: switchState)
+            if (logDescText) {
+                log.info "${device.displayName} airConOperationMode: ${opMode}, Switch: ${switchState}"
+            }
         }
+
+        sendEvent(name: "thermostatMode", value: lgJobModeToThermostatMode(jobMode, isPoweredOff))
+        def operatingState = isPoweredOff ? "idle" : lgJobModeToOperatingState(jobMode)
+        sendEvent(name: "thermostatOperatingState", value: operatingState)
     }
-
-    // Derive thermostatMode from job mode + power state
-    def thermostatMode = lgJobModeToThermostatMode(currentJobModeRaw, isPoweredOff)
-    sendEvent(name: "thermostatMode", value: thermostatMode)
-
-    // Derive thermostatOperatingState
-    def operatingState = isPoweredOff ? "idle" : lgJobModeToOperatingState(currentJobModeRaw)
-    sendEvent(name: "thermostatOperatingState", value: operatingState)
 
     if (data.operation?.airCleanOperationMode) {
         def cleanMode = cleanEnumValue(data.operation.airCleanOperationMode)
