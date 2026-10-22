@@ -458,6 +458,17 @@ def getDeviceState(deviceId) {
     return apiGet("/devices/${deviceId}/state")
 }
 
+def getEnergyProfile(deviceId) {
+    logger("debug", "getEnergyProfile(${deviceId})")
+    return apiGet("/devices/energy/${deviceId}/profile")
+}
+
+// period: DAILY (dates yyyyMMdd) or MONTHLY (dates yyyyMM). Usage is in Wh.
+def getEnergyUsage(deviceId, String property, String period, String startDate, String endDate) {
+    logger("debug", "getEnergyUsage(${deviceId}, ${property}, ${period}, ${startDate}, ${endDate})")
+    return apiGet("/devices/energy/${deviceId}/usage?property=${property}&period=${period}&startDate=${startDate}&endDate=${endDate}")
+}
+
 def registerPushNotifications() {
     logger("debug", "registerPushNotifications()")
     

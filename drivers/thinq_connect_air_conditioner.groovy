@@ -8,6 +8,7 @@
 
 import groovy.transform.Field
 import groovy.json.JsonSlurper
+import java.math.RoundingMode
 
 @Field List<String> LOG_LEVELS = ["error", "warn", "info", "debug", "trace"]
 @Field String DEFAULT_LOG_LEVEL = LOG_LEVELS[2]
@@ -20,8 +21,13 @@ metadata {
         capability "Refresh"
         capability "TemperatureMeasurement"
         capability "Thermostat"
+        capability "EnergyMeter"
 
         attribute "currentState", "string"
+        attribute "energyToday", "number"
+        attribute "energyYesterday", "number"
+        attribute "energyThisMonth", "number"
+        attribute "energyLastMonth", "number"
         attribute "currentJobMode", "string"
         attribute "airConOperationMode", "string"
         attribute "airCleanOperationMode", "string"
@@ -73,6 +79,7 @@ metadata {
         command "stop"
         // command "powerOff"
         command "getDeviceProfile"
+        command "refreshEnergy"
         command "setAirConOperationMode", ["string"]
         command "setAirCleanOperationMode", ["string"]
         command "setAirConJobMode", [[name:"Set AirConJobMode", type: "ENUM", description: "Select AirCon Job Mode", constraints: ["COOL", "HEAT", "AUTO", "AIR_CLEAN", "ENERGY_SAVING", "AIR_DRY", "FAN"]]]
@@ -96,6 +103,7 @@ metadata {
     preferences {
         section {
             input name: 'isFahrenheit', type: 'bool', title: '<b>Fahrenheit</b>', description: '<i>Use fahrenheit degrees</i>', defaultValue: true
+            input name: "energyRefreshMinutes", type: "enum", title: "Energy usage refresh", description: "How often to read energy usage from the ThinQ API", options: ["0": "Disabled", "30": "Every 30 minutes", "60": "Every hour", "180": "Every 3 hours"], defaultValue: "60", required: false
             input name: "logLevel", title: "Log Level", type: "enum", options: LOG_LEVELS, defaultValue: DEFAULT_LOG_LEVEL, required: false
             input name: "logDescText", title: "Log Description Text", type: "bool", defaultValue: false, required: false
         }
@@ -141,6 +149,7 @@ def initialize() {
     }
     
     refresh()
+    scheduleEnergyRefresh()
 }
 
 def refresh() {
@@ -886,4 +895,65 @@ private logger(level, msg) {
             log."${level}" "${device.displayName} ${msg}"
         }
     }
+}
+
+private void scheduleEnergyRefresh() {
+    unschedule("refreshEnergy")
+    Integer minutes = (energyRefreshMinutes ?: "60") as Integer
+    if (minutes <= 0) return
+    if (minutes < 60) {
+        schedule("0 */${minutes} * ? * *", "refreshEnergy")
+    } else {
+        schedule("0 ${now().intdiv(1000L) % 60L} */${minutes.intdiv(60)} ? * *", "refreshEnergy")
+    }
+    runIn(10, "refreshEnergy")
+}
+
+// Energy usage comes from separate ThinQ Connect endpoints (/devices/energy/...),
+// not from the device state. Values are reported in Wh and published in kWh.
+def refreshEnergy() {
+    logger("debug", "refreshEnergy()")
+    def deviceId = getDeviceId()
+    if (!state.energyProperty) {
+        def profile = parent.getEnergyProfile(deviceId)
+        def properties = (profile?.result ?: profile)?.property
+        if (properties) state.energyProperty = properties[0].toString()
+    }
+    if (!state.energyProperty) {
+        logger("info", "Energy usage is not available for this device")
+        unschedule("refreshEnergy")
+        return
+    }
+
+    TimeZone tz = location.timeZone
+    Date now = new Date()
+    Calendar lastMonthCal = Calendar.getInstance(tz)
+    lastMonthCal.setTime(now)
+    lastMonthCal.add(Calendar.MONTH, -1)
+
+    String today = now.format("yyyyMMdd", tz)
+    String yesterday = (now - 1).format("yyyyMMdd", tz)
+    String thisMonth = now.format("yyyyMM", tz)
+    String lastMonth = lastMonthCal.getTime().format("yyyyMM", tz)
+
+    Map daily = energyUsageByDate(deviceId, "DAILY", yesterday, today)
+    Map monthly = energyUsageByDate(deviceId, "MONTHLY", lastMonth, thisMonth)
+
+    sendEnergyEvent("energyToday", daily[today])
+    sendEnergyEvent("energyYesterday", daily[yesterday])
+    sendEnergyEvent("energyThisMonth", monthly[thisMonth])
+    sendEnergyEvent("energyLastMonth", monthly[lastMonth])
+    sendEnergyEvent("energy", monthly[thisMonth])
+}
+
+private Map energyUsageByDate(deviceId, String period, String startDate, String endDate) {
+    def response = parent.getEnergyUsage(deviceId, state.energyProperty, period, startDate, endDate)
+    def dataList = (response?.result ?: response)?.dataList ?: []
+    return dataList.collectEntries { [(it.usedDate?.toString()): it[state.energyProperty]] }
+}
+
+private void sendEnergyEvent(String name, wh) {
+    if (wh == null) return
+    BigDecimal kwh = (wh as BigDecimal).divide(1000G, 3, RoundingMode.HALF_UP)
+    sendEvent(name: name, value: kwh, unit: "kWh")
 }
